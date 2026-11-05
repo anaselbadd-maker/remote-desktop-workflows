@@ -1,84 +1,101 @@
-name: WINDOWS RDP - CLOUDFLARE
+name: macOS VNC - CLOUDFLARE
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
-    timeout-minutes: 360   # GitHub caps hosted runners at 6h anyway
+    runs-on: macos-latest
+    timeout-minutes: 360
 
     steps:
-      - name: Setup Cloudflared
-        uses: AnimMouse/setup-cloudflared@v2
-
-      - name: Enable Windows RDP
+      - name: Install Cloudflared
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
-          Write-Host "✅ RDP Enabled Successfully!"
+          brew install cloudflare/cloudflare/cloudflared
+          echo "✅ Cloudflared Installed!"
 
-      - name: Set Administrator Password
+      - name: Enable VNC/Screen Sharing
         run: |
-          Set-LocalUser -Name "runneradmin" -Password (ConvertTo-SecureString -AsPlainText "P@ssw0rd123!" -Force)
-          Write-Host "✅ Password Configured!"
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -access -on -restart -agent -privs -all -allowAccessFor -allUsers
+          sudo defaults write /var/db/launchd.db/com.apple.launchd/overrides.plist com.apple.screensharing -dict Disabled -bool false
+          echo "✅ VNC Enabled!"
+
+      - name: Set VNC Password (Legacy VNC)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /Library/Preferences
+
+          # Set legacy VNC password via kickstart
+          echo "P@ssw0rd123!" | sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on -restart -agent -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw P@ssw0rd123!
+
+          # Also write the MD5 hash directly into the plist (more reliable on newer macOS)
+          HASH=$(md5 -q -s "P@ssw0rd123!")
+          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
+          sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
+          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(printf '%s' "$HASH" | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
+
+          sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
+          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
+          echo "✅ VNC Password Set!"
 
       - name: Start Cloudflare Tunnel
-        shell: pwsh
         run: |
-          Write-Host "============================================"
-          Write-Host "🚀 WINDOWS RDP - CLOUDFLARE TUNNEL"
-          Write-Host "============================================"
-          Write-Host ""
+          echo "============================================"
+          echo "🚀 macOS VNC - CLOUDFLARE TUNNEL"
+          echo "============================================"
+          echo ""
 
-          $out = Join-Path $PWD "tunnel.out"
-          $err = Join-Path $PWD "tunnel.err"
+          cloudflared tunnel --url tcp://localhost:5900 --no-autoupdate > tunnel.log 2>&1 &
 
-          # Run cloudflared in THIS window (no detached PowerShell) and log to files
-          Start-Process -FilePath "cloudflared.exe" `
-            -ArgumentList "tunnel","--url","tcp://localhost:3389","--no-autoupdate" `
-            -RedirectStandardOutput $out `
-            -RedirectStandardError  $err `
-            -NoNewWindow
+          URL=""
+          for i in $(seq 1 30); do
+            sleep 2
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n1 || true)
+            [ -n "$URL" ] && break
+          done
 
-          # Poll the logs until the trycloudflare URL shows up
-          $url = $null
-          for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 2
-            $m = Select-String -Path $err,$out `
-                   -Pattern 'https://[a-z0-9-]+\.trycloudflare\.com' `
-                   -ErrorAction SilentlyContinue |
-                 Select-Object -First 1
-            if ($m) { $url = $m.Matches[0].Value; break }
-          }
-
-          if (-not $url) {
-            Write-Host "❌ Could not extract tunnel URL. Full cloudflared log:"
-            Get-Content $err,$out -ErrorAction SilentlyContinue
+          if [ -z "$URL" ]; then
+            echo "❌ Could not extract tunnel URL. Full log:"
+            cat tunnel.log
             exit 1
-          }
+          fi
 
-          $host_ = $url -replace '^https://',''
+          HOST=${URL#https://}
 
-          Write-Host ""
-          Write-Host "🌐 TUNNEL URL : $url"
-          Write-Host "🌐 HOSTNAME   : $host_"
-          Write-Host ""
-          Write-Host "📋 CONNECTION DETAILS:"
-          Write-Host "   USERNAME: runneradmin"
-          Write-Host "   PASSWORD: P@ssw0rd123!"
-          Write-Host "   OS: Windows Server 2022"
-          Write-Host "============================================"
-          Write-Host ""
-          Write-Host "On your PC run:"
-          Write-Host "   cloudflared access tcp --hostname $host_ --url localhost:3389"
-          Write-Host "Then open mstsc and connect to localhost:3389"
-          Write-Host ""
+          echo ""
+          echo "🌐 TUNNEL URL : $URL"
+          echo "🌐 HOSTNAME   : $HOST"
+          echo ""
+          echo "📋 CONNECTION DETAILS:"
+          echo "   PASSWORD: P@ssw0rd123!"
+          echo "   OS: macOS Monterey/Ventura"
+          echo "   Architecture: $(uname -m)"
+          echo "============================================"
+          echo ""
+          echo "On your PC run:"
+          echo "   cloudflared access tcp --hostname $HOST --url localhost:5900"
+          echo "Then connect with a VNC viewer to localhost:5900"
+          echo ""
 
-          # Put the URL in big text at the top of the run page
-          $summary = @"
-## 🌐 Tunnel URL
+          {
+            echo "## 🌐 Tunnel URL"
+            echo ""
+            echo "\`$URL\`"
+            echo ""
+            echo "### Client command"
+            echo '```'
+            echo "cloudflared access tcp --hostname $HOST --url localhost:5900"
+            echo '```'
+            echo ""
+            echo "Then open a VNC viewer to \`localhost:5900\`, password \`P@ssw0rd123!\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-``$url``
-
-### Client command
+      - name: Keep Session Alive
+        run: |
+          echo "⏳ Session Active - Keeping alive..."
+          while true; do
+            sleep 60
+            echo "✓ Active - $(date '+%H:%M:%S')"
+          done
