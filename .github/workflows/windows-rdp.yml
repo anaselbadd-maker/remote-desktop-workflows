@@ -32,15 +32,18 @@ jobs:
 
           # Also write the MD5 hash directly into the plist (more reliable on newer macOS)
           HASH=$(md5 -q -s "P@ssw0rd123!")
+          ENCODED=$(printf '%s' "$HASH" | xxd -r -p | base64)
+
           sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords array" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
           sudo /usr/libexec/PlistBuddy -c "Delete :VNCLegacyPasswords:0" /Library/Preferences/com.apple.RemoteManagement.plist 2>/dev/null || true
-          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $(printf '%s' "$HASH" | xxd -r -p | base64)" /Library/Preferences/com.apple.RemoteManagement.plist
+          sudo /usr/libexec/PlistBuddy -c "Add :VNCLegacyPasswords:0 data $ENCODED" /Library/Preferences/com.apple.RemoteManagement.plist
 
           sudo launchctl unload /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist
           echo "✅ VNC Password Set!"
 
       - name: Start Cloudflare Tunnel
+        shell: bash
         run: |
           echo "============================================"
           echo "🚀 macOS VNC - CLOUDFLARE TUNNEL"
@@ -53,7 +56,7 @@ jobs:
           for i in $(seq 1 30); do
             sleep 2
             URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' tunnel.log | head -n1 || true)
-            [ -n "$URL" ] && break
+            if [ -n "$URL" ]; then break; fi
           done
 
           if [ -z "$URL" ]; then
@@ -79,18 +82,17 @@ jobs:
           echo "Then connect with a VNC viewer to localhost:5900"
           echo ""
 
-          {
-            echo "## 🌐 Tunnel URL"
-            echo ""
-            echo "\`$URL\`"
-            echo ""
-            echo "### Client command"
-            echo '```'
-            echo "cloudflared access tcp --hostname $HOST --url localhost:5900"
-            echo '```'
-            echo ""
-            echo "Then open a VNC viewer to \`localhost:5900\`, password \`P@ssw0rd123!\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🌐 Tunnel URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$URL\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Client command" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "cloudflared access tcp --hostname $HOST --url localhost:5900" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Then open a VNC viewer to \`localhost:5900\`, password \`P@ssw0rd123!\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep Session Alive
         run: |
